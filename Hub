@@ -1,0 +1,412 @@
+--===============================================================
+--  VENICE HUB · MÓVIL · [DUELOS] Asesinos VS Policías
+--  v1.1 · stealth corregido
+--===============================================================
+
+local ok, Rayfield = pcall(function()
+    return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+end)
+if not ok then return end
+
+local Players = game:GetService("Players")
+local Run     = game:GetService("RunService")
+local UIS     = game:GetService("UserInputService")
+local VIM     = game:GetService("VirtualInputManager")
+local TS      = game:GetService("TeleportService")
+local WS      = game:GetService("Workspace")
+local VU      = game:GetService("VirtualUser")
+local CoreGui = game:GetService("CoreGui")
+local Cam     = WS.CurrentCamera
+local LP      = Players.LocalPlayer
+local Mouse   = LP:GetMouse()
+
+if getgenv().VH then pcall(getgenv().VH.Unload) end
+
+local C = {
+    aim = false, silent = false, autoShoot = false,
+    fov = 150, smooth = 0.30, pred = 0.14, fireRate = 0.18, silentRange = 400,
+    wallCheck = true, esp = false, espDist = true,
+    hitbox = false, hitboxSize = 6,
+    antiAfk = true, antiVoid = true,
+    stealth = true, blockKick = true, rejoin = true,
+    spoofSpeed = true, walk = 40, jump = 90,
+    kickLog = "limpio",
+}
+local AIM, Conn, EspTags, SavedSize, lastShot, LastSafe = {}, {}, {}, {}, 0, nil
+local circle
+local function ours() return checkcaller and checkcaller() end
+
+--===============================================================
+--  STEALTH
+--===============================================================
+local baseline = {}
+for _, v in ipairs(CoreGui:GetChildren()) do baseline[v] = true end
+
+local function esOculto(inst)
+    if not C.stealth or not inst then return false end
+    if baseline[inst] then return false end
+    local p = inst
+    while p and p ~= CoreGui do
+        if baseline[p] then return false end
+        p = p.Parent
+    end
+    return true
+end
+
+--===============================================================
+--  BYPASS
+--===============================================================
+local H = { old = {} }
+
+if hookmetamethod and newcclosure then
+    H.old.namecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local m = getnamecallmethod()
+        local safe = ours()
+
+        if self == CoreGui and not safe and C.stealth then
+            if m == "GetChildren" or m == "GetDescendants" then
+                local list = H.old.namecall(self, ...)
+                local out = {}
+                for _, v in ipairs(list) do if not esOculto(v) then out[#out + 1] = v end end
+                return out
+            end
+            if m == "FindFirstChild" or m == "WaitForChild" then
+                local nm = ...
+                local real = H.old.namecall(self, ...)
+                if real and esOculto(real) then
+                    if m == "FindFirstChild" then return nil end
+                    for _, v in ipairs(CoreGui:GetChildren()) do
+                        if v.Name == nm and not esOculto(v) then return v end
+                    end
+                    return nil
+                end
+                return real
+            end
+        end
+
+        if m == "Kick" and self == LP then
+            C.kickLog = tostring((...))
+            warn("[Venice] Kick detectado: " .. C.kickLog)
+            pcall(function()
+                Rayfield:Notify({ Title = "Kick bloqueado", Content = C.kickLog, Duration = 6 })
+            end)
+            if C.blockKick then
+                task.spawn(function()
+                    task.wait(2.5)
+                    if not LP.Parent and C.rejoin then
+                        pcall(function() TS:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP) end)
+                    end
+                end)
+                return
+            end
+        end
+
+        if m == "FireServer" and AIM.pos and C.silent and not safe then
+            local args = table.pack(...)
+            local t = typeof(args[1])
+            if t == "CFrame" then
+                local d = (args[1].Position - AIM.pos).Magnitude
+                if d > 0.05 and d < C.silentRange then
+                    args[1] = CFrame.new(AIM.pos) * (args[1] - args[1].Position)
+                    return H.old.namecall(self, table.unpack(args, 1, args.n))
+                end
+            elseif t == "Vector3" then
+                local d = (args[1] - AIM.pos).Magnitude
+                if d > 0.05 and d < C.silentRange then
+                    args[1] = AIM.pos
+                    return H.old.namecall(self, table.unpack(args, 1, args.n))
+                end
+            end
+        end
+
+        return H.old.namecall(self, ...)
+    end))
+
+    H.old.index = hookmetamethod(game, "__index", newcclosure(function(self, k)
+        if AIM.pos and C.silent and not ours() and self == Mouse then
+            if k == "Hit" then return CFrame.new(AIM.pos) end
+            if k == "Target" then return AIM.ch end
+        end
+        return H.old.index(self, k)
+    end))
+
+    H.old.newindex = hookmetamethod(game, "__newindex", newcclosure(function(self, k, v)
+        if C.spoofSpeed and not ours() and typeof(self) == "Instance" and self:IsA("Humanoid") then
+            if k == "WalkSpeed" and typeof(v) == "number" and v < C.walk - 2 then return end
+            if k == "JumpPower" and typeof(v) == "number" and v < C.jump - 2 then return end
+        end
+        return H.old.newindex(self, k, v)
+    end))
+end
+
+--===============================================================
+--  DISPARO
+--===============================================================
+local function mid() return Cam.ViewportSize / 2 end
+
+local function fire()
+    if mouse1click then pcall(mouse1click) return end
+    pcall(function()
+        VU:CaptureController()
+        VU:ClickButton1(Vector2.new())
+    end)
+end
+
+--===============================================================
+--  TARGETING
+--===============================================================
+local function getTarget()
+    local best, bestD = nil, C.fov
+    local c, origin = mid(), Cam.CFrame.Position
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local ch = plr.Character
+            local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+            local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if hum and hrp and hum.Health > 0 then
+                local aimPos = hrp.Position + hrp.AssemblyLinearVelocity * C.pred
+                local sp, on = Cam:WorldToViewportPoint(aimPos)
+                if on and sp.Z > 0 then
+                    local d = (Vector2.new(sp.X, sp.Y) - c).Magnitude
+                    if d <= bestD then
+                        local clear = true
+                        if C.wallCheck then
+                            local rp = RaycastParams.new()
+                            rp.FilterType = Enum.RaycastFilterType.Exclude
+                            rp.FilterDescendantsInstances = { ch, LP.Character, Cam }
+                            local hit = WS:Raycast(origin, aimPos - origin, rp)
+                            if hit and not hit.Instance:IsDescendantOf(ch) then clear = false end
+                        end
+                        if clear then
+                            bestD = d
+                            best = { ch = ch, pos = aimPos }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+--===============================================================
+--  ESP / HITBOX
+--===============================================================
+local function clearEsp()
+    for _, o in pairs(EspTags) do
+        if o.hl then o.hl:Destroy() end
+        if o.bb then o.bb:Destroy() end
+    end
+    EspTags = {}
+end
+
+local function buildEsp(plr)
+    local ch = plr.Character
+    if not ch or EspTags[plr] then return end
+    local hl = Instance.new("Highlight")
+    hl.FillColor = Color3.fromRGB(0, 170, 255)
+    hl.FillTransparency = 0.55
+    hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    hl.Adornee = ch
+    hl.Parent = CoreGui
+    local head = ch:FindFirstChild("Head")
+    local bb
+    if head then
+        bb = Instance.new("BillboardGui")
+        bb.Size = UDim2.fromOffset(170, 28)
+        bb.StudsOffset = Vector3.new(0, 2.4, 0)
+        bb.AlwaysOnTop = true
+        bb.Adornee = head
+        bb.Parent = CoreGui
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.fromScale(1, 1)
+        t.BackgroundTransparency = 1
+        t.Font = Enum.Font.GothamBold
+        t.TextSize = 13
+        t.TextColor3 = Color3.fromRGB(0, 190, 255)
+        t.Text = plr.Name
+        t.Parent = bb
+    end
+    EspTags[plr] = { hl = hl, bb = bb, label = bb and bb:FindFirstChildOfClass("TextLabel") }
+end
+
+local function refreshEsp()
+    clearEsp()
+    if C.esp then for _, p in ipairs(Players:GetPlayers()) do if p ~= LP then buildEsp(p) end end end
+end
+
+local function setHitbox(on)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        local ch = plr.Character
+        if ch then
+            for _, n in ipairs({ "HumanoidRootPart", "Torso", "UpperTorso" }) do
+                local p = ch:FindFirstChild(n)
+                if p and p:IsA("BasePart") then
+                    if on then
+                        SavedSize[p] = p.Size
+                        p.Size = p.Size * C.hitboxSize
+                        p.CanCollide = false
+                    elseif SavedSize[p] then
+                        p.Size = SavedSize[p]
+                        SavedSize[p] = nil
+                    end
+                end
+            end
+        end
+    end
+end
+
+--===============================================================
+--  LOOPS
+--===============================================================
+if Drawing then
+    circle = Drawing.new("Circle")
+    circle.Thickness = 1
+    circle.Color = Color3.fromRGB(0, 180, 255)
+    circle.Filled = false
+end
+
+table.insert(Conn, Run.RenderStepped:Connect(function()
+    if Cam ~= WS.CurrentCamera then Cam = WS.CurrentCamera end
+    local t = (C.aim or C.autoShoot or C.silent) and getTarget() or nil
+    AIM.pos, AIM.ch = t and t.pos or nil, t and t.ch or nil
+
+    if circle then
+        circle.Visible = (C.aim or C.autoShoot) and not C.silent
+        circle.Position = mid()
+        circle.Radius = C.fov
+    end
+
+    if t and C.aim then
+        Cam.CFrame = Cam.CFrame:Lerp(CFrame.lookAt(Cam.CFrame.Position, t.pos), C.smooth)
+    end
+
+    if C.esp and C.espDist then
+        for plr, o in pairs(EspTags) do
+            local a = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            local b = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if o.label then
+                o.label.Text = (a and b) and (plr.Name .. "  [" .. math.floor((a.Position - b.Position).Magnitude) .. "m]") or plr.Name
+            end
+        end
+    end
+end))
+
+local shootThread = task.spawn(function()
+    while true do
+        task.wait(0.02)
+        if C.autoShoot and AIM.pos and os.clock() - lastShot >= C.fireRate then
+            lastShot = os.clock()
+            task.spawn(fire)
+        end
+    end
+end)
+
+table.insert(Conn, Run.Heartbeat:Connect(function()
+    local ch = LP.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+    if hrp.Position.Y > -10 then LastSafe = hrp.CFrame end
+    if C.antiVoid and hrp.Position.Y < -60 and LastSafe then ch:PivotTo(LastSafe) end
+end))
+
+table.insert(Conn, LP.Idled:Connect(function()
+    if C.antiAfk then VU:CaptureController() VU:ClickButton2(Vector2.new()) end
+end))
+
+Players.PlayerAdded:Connect(function(p) if C.esp then task.wait(1) buildEsp(p) end end)
+Players.PlayerRemoving:Connect(function(p)
+    local o = EspTags[p]
+    if o then if o.hl then o.hl:Destroy() end if o.bb then o.bb:Destroy() end EspTags[p] = nil end
+end)
+
+--===============================================================
+--  UI
+--===============================================================
+local Window = Rayfield:CreateWindow({
+    Name = "Venice · Duels",
+    LoadingTitle = "Venice",
+    LoadingSubtitle = "mobile",
+    ConfigurationSaving = { Enabled = false },
+    Discord = { Enabled = false },
+    KeySystem = false,
+})
+
+local Combat  = Window:CreateTab("Combat", 4483362458)
+local Stealth = Window:CreateTab("Stealth", 4483362458)
+local Visual  = Window:CreateTab("Visuals", 4483362458)
+local Misc    = Window:CreateTab("Misc", 4483362458)
+
+Combat:CreateSection("Aim")
+
+Combat:CreateToggle({ Name = "Aimbot", CurrentValue = false, Flag = "aim", Callback = function(v) C.aim = v end })
+Combat:CreateToggle({ Name = "Silent Aim (hook)", CurrentValue = false, Flag = "silent", Callback = function(v) C.silent = v end })
+Combat:CreateSlider({ Name = "FOV", Range = { 40, 500 }, Increment = 5, CurrentValue = 150, Flag = "fov",
+    Callback = function(v) C.fov = v end })
+Combat:CreateSlider({ Name = "Smooth", Range = { 0.05, 1 }, Increment = 0.05, CurrentValue = 0.3, Flag = "sm",
+    Callback = function(v) C.smooth = v end })
+Combat:CreateSlider({ Name = "Predicción", Range = { 0, 0.5 }, Increment = 0.01, CurrentValue = 0.14, Flag = "pr",
+    Callback = function(v) C.pred = v end })
+Combat:CreateToggle({ Name = "Wall Check", CurrentValue = true, Flag = "wc", Callback = function(v) C.wallCheck = v end })
+
+Combat:CreateSection("Auto")
+
+Combat:CreateToggle({ Name = "Auto Shoot", CurrentValue = false, Flag = "as", Callback = function(v) C.autoShoot = v end })
+Combat:CreateSlider({ Name = "Fire Rate (lento = menos kick)", Range = { 0.05, 0.6 }, Increment = 0.01, CurrentValue = 0.18,
+    Flag = "fr", Callback = function(v) C.fireRate = v end })
+
+Combat:CreateSection("Hitbox")
+
+Combat:CreateToggle({ Name = "Hitbox Expander", CurrentValue = false, Flag = "hb", Callback = function(v)
+    C.hitbox = v setHitbox(v)
+end })
+Combat:CreateSlider({ Name = "Tamaño", Range = { 2, 35 }, Increment = 1, CurrentValue = 6, Flag = "hbs",
+    Callback = function(v) C.hitboxSize = v if C.hitbox then setHitbox(false) setHitbox(true) end end })
+
+Stealth:CreateSection("Anti-detección")
+
+Stealth:CreateToggle({ Name = "Modo stealth (oculta GUI)", CurrentValue = true, Flag = "st", Callback = function(v)
+    C.stealth = v
+end })
+Stealth:CreateToggle({ Name = "Bloquear Kick", CurrentValue = true, Flag = "bk", Callback = function(v) C.blockKick = v end })
+Stealth:CreateToggle({ Name = "Auto Rejoin si insiste", CurrentValue = true, Flag = "rj", Callback = function(v) C.rejoin = v end })
+
+Stealth:CreateSection("Speed")
+
+Stealth:CreateToggle({ Name = "Bloquear resets del juego", CurrentValue = true, Flag = "ss", Callback = function(v) C.spoofSpeed = v end })
+Stealth:CreateSlider({ Name = "WalkSpeed", Range = { 16, 200 }, Increment = 2, CurrentValue = 40, Flag = "ws",
+    Callback = function(v)
+        C.walk = v
+        local hum = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum.WalkSpeed = v end
+    end })
+
+Stealth:CreateButton({ Name = "Ver último Kick (F9)", Callback = function()
+    warn("[Venice] Último kick: " .. C.kickLog)
+end })
+
+Visual:CreateToggle({ Name = "ESP", CurrentValue = false, Flag = "esp", Callback = function(v) C.esp = v refreshEsp() end })
+Visual:CreateToggle({ Name = "Distancia", CurrentValue = true, Flag = "ed", Callback = function(v) C.espDist = v end })
+Visual:CreateButton({ Name = "Refrescar", Callback = refreshEsp })
+
+Misc:CreateToggle({ Name = "Anti-AFK", CurrentValue = true, Flag = "afk", Callback = function(v) C.antiAfk = v end })
+Misc:CreateToggle({ Name = "Anti-Void", CurrentValue = true, Flag = "av", Callback = function(v) C.antiVoid = v end })
+Misc:CreateButton({ Name = "Unload", Callback = function() getgenv().VH.Unload() end })
+
+--===============================================================
+--  UNLOAD
+--===============================================================
+local function Unload()
+    for _, c in ipairs(Conn) do pcall(function() c:Disconnect() end) end
+    pcall(function() task.cancel(shootThread) end)
+    if H.old.namecall then pcall(function() hookmetamethod(game, "__namecall", H.old.namecall) end) end
+    if H.old.index then pcall(function() hookmetamethod(game, "__index", H.old.index) end) end
+    if H.old.newindex then pcall(function() hookmetamethod(game, "__newindex", H.old.newindex) end) end
+    clearEsp() setHitbox(false)
+    if circle then circle:Remove() end
+    pcall(function() Window:Destroy() end)
+    getgenv().VH = nil
+end
+
+getgenv().VH = { Unload = Unload }
+Rayfield:Notify({ Title = "Venice", Content = "Stealth activo", Duration = 5 })
